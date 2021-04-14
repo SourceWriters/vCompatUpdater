@@ -239,19 +239,19 @@ public final class CompatUpdater {
             connection.addRequestProperty("Accept", "application/octet-stream");
             connection.connect();
             InputStream stream = connection.getInputStream();
-            int length = connection.getContentLength();
-            int current = 0;
             FileOutputStream output = new FileOutputStream(jarFile);
             if (jarFile.exists()) {
                 jarFile.delete();
             }
             Files.createFile(jarFile);
-            while (current != length) {
-                int value = length - current;
-                if (value > 64) {
-                    value = 64;
+            Informer inform = new Informer();
+            inform.length = connection.getContentLength();
+            while (inform.current != inform.length) {
+                int value = inform.length - inform.current;
+                if (value > 16) {
+                    value = 16;
                 }
-                current += value;
+                inform.current += value;
                 byte[] array = new byte[value];
                 stream.read(array);
                 output.write(array);
