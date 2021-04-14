@@ -218,7 +218,24 @@ public final class CompatUpdater {
             read.unlock();
         }
         try {
-            HttpURLConnection connection = (HttpURLConnection) new URL(String.format(GITHUB_RELEASE, 'v' + version)).openConnection();
+            String url = getAssetUrl(version);
+            if (url == null) {
+                read.lock();
+                try {
+                    version = exactVersion;
+                } finally {
+                    read.unlock();
+                }
+                if (version == null) {
+                    setFailed(new NullPointerException("Couldn't obtain release jar"));
+                    updateAll();
+                    return;
+                }
+                loadCompatLib();
+                updateAll();
+                return;
+            }
+            HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
             connection.addRequestProperty("Accept", "application/octet-stream");
             connection.connect();
             InputStream stream = connection.getInputStream();
@@ -244,11 +261,47 @@ public final class CompatUpdater {
             stream.close();
             connection.disconnect();
             setState(State.SUCCESS);
+            write.lock();
+            try {
+                exactVersion = version;
+            } finally {
+                write.unlock();
+            }
         } catch (IOException exp) {
             setFailed(exp);
         }
         loadCompatLib();
         updateAll();
+    }
+
+    private String getAssetUrl(String version) throws IOException {
+        Response response = new Request(RequestType.GET).header("Accept", "application/vnd.github.v3+json")
+            .execute(String.format(GITHUB_RELEASE, 'v' + version), StandardContentType.JSON);
+        if (response.getCode() != 200) {
+            return null;
+        }
+        JsonObject object = (JsonObject) response.getResponseAsJson();
+        if (!object.has("assets", ValueType.ARRAY)) {
+            return null;
+        }
+        JsonArray array = (JsonArray) object.get("assets");
+        if (array.size() == 0) {
+            return null;
+        }
+        for (JsonValue<?> value : array) {
+            if (value.getType() != ValueType.OBJECT) {
+                continue;
+            }
+            JsonObject asset = (JsonObject) value;
+            if (!asset.has("name", ValueType.STRING)) {
+                continue;
+            }
+            String name = (String) asset.get("name").getValue();
+            if (name.startsWith("vcompat") && name.endsWith(".jar") && asset.has("url", ValueType.STRING)) {
+                return (String) asset.get("url").getValue();
+            }
+        }
+        return null;
     }
 
     private void loadCompatLib() {
@@ -423,7 +476,7 @@ public final class CompatUpdater {
             if (githubVersion == null) {
                 return true;
             }
-            return exactVersion.equals(githubVersion);
+            return githubVersion.equals(exactVersion);
         } finally {
             read.unlock();
         }
