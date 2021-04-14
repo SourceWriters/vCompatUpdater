@@ -11,6 +11,8 @@ import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.HashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.ZipEntry;
@@ -35,6 +37,8 @@ public final class CompatUpdater {
 
     private static final String GITHUB_RELEASE = "https://api.github.com/repos/SourceWriters/vCompat/releases/tags/%s";
     private static final String GITHUB_TAGS = "https://api.github.com/repos/SourceWriters/vCompat/tags";
+
+    private final ExecutorService updater = Executors.newSingleThreadExecutor();
 
     private final HashMap<String, CompatApp> apps = new HashMap<>();
     private final Lock read, write;
@@ -208,70 +212,72 @@ public final class CompatUpdater {
     }
 
     private void downloadNewVersion() {
-        String version;
-        File jarFile;
-        read.lock();
-        try {
-            version = githubVersion;
-            jarFile = file;
-        } finally {
-            read.unlock();
-        }
-        try {
-            String url = getAssetUrl(version);
-            if (url == null) {
-                read.lock();
-                try {
-                    version = exactVersion;
-                } finally {
-                    read.unlock();
-                }
-                if (version == null) {
-                    setFailed(new NullPointerException("Couldn't obtain release jar"));
+        updater.submit(() -> {
+            String version;
+            File jarFile;
+            read.lock();
+            try {
+                version = githubVersion;
+                jarFile = file;
+            } finally {
+                read.unlock();
+            }
+            try {
+                String url = getAssetUrl(version);
+                if (url == null) {
+                    read.lock();
+                    try {
+                        version = exactVersion;
+                    } finally {
+                        read.unlock();
+                    }
+                    if (version == null) {
+                        setFailed(new NullPointerException("Couldn't obtain release jar"));
+                        updateAll();
+                        return;
+                    }
+                    loadCompatLib();
                     updateAll();
                     return;
                 }
-                loadCompatLib();
-                updateAll();
-                return;
-            }
-            HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-            connection.addRequestProperty("Accept", "application/octet-stream");
-            connection.connect();
-            InputStream stream = connection.getInputStream();
-            FileOutputStream output = new FileOutputStream(jarFile);
-            if (jarFile.exists()) {
-                jarFile.delete();
-            }
-            Files.createFile(jarFile);
-            Informer inform = new Informer();
-            inform.length = connection.getContentLength();
-            while (inform.current != inform.length) {
-                int value = inform.length - inform.current;
-                if (value > 16) {
-                    value = 16;
+                HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+                connection.addRequestProperty("Accept", "application/octet-stream");
+                connection.connect();
+                InputStream stream = connection.getInputStream();
+                FileOutputStream output = new FileOutputStream(jarFile);
+                if (jarFile.exists()) {
+                    jarFile.delete();
                 }
-                inform.current += value;
-                byte[] array = new byte[value];
-                stream.read(array);
-                output.write(array);
+                Files.createFile(jarFile);
+                Informer inform = new Informer();
+                inform.length = connection.getContentLength();
+                while (inform.current != inform.length) {
+                    int value = inform.length - inform.current;
+                    if (value > 16) {
+                        value = 16;
+                    }
+                    inform.current += value;
+                    byte[] array = new byte[value];
+                    stream.read(array);
+                    output.write(array);
+                }
+                output.flush();
+                output.close();
+                stream.close();
+                connection.disconnect();
+                setState(State.SUCCESS);
+                write.lock();
+                try {
+                    exactVersion = version;
+                } finally {
+                    write.unlock();
+                }
+            } catch (IOException exp) {
+                setFailed(exp);
             }
-            output.flush();
-            output.close();
-            stream.close();
-            connection.disconnect();
-            setState(State.SUCCESS);
-            write.lock();
-            try {
-                exactVersion = version;
-            } finally {
-                write.unlock();
-            }
-        } catch (IOException exp) {
-            setFailed(exp);
-        }
-        loadCompatLib();
-        updateAll();
+            loadCompatLib();
+            updateAll();
+        });
     }
 
     private String getAssetUrl(String version) throws IOException {
