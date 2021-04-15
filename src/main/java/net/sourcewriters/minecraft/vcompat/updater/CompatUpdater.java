@@ -12,6 +12,9 @@ import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,7 +32,6 @@ import com.syntaxphoenix.syntaxapi.net.http.Request;
 import com.syntaxphoenix.syntaxapi.net.http.RequestType;
 import com.syntaxphoenix.syntaxapi.net.http.Response;
 import com.syntaxphoenix.syntaxapi.net.http.StandardContentType;
-import com.syntaxphoenix.syntaxapi.utils.java.Files;
 
 public final class CompatUpdater {
 
@@ -41,7 +43,8 @@ public final class CompatUpdater {
     private final HashMap<String, CompatApp> apps = new HashMap<>();
     private final Lock read, write;
 
-    private final File file = new File("plugins/vCompat", "vCompat.jar");
+    private final Path directory = Paths.get("plugins/vCompat");
+    private final Path file = directory.resolve("vCompat.jar");
 
     private String githubVersion;
     private String exactVersion;
@@ -54,11 +57,16 @@ public final class CompatUpdater {
     private String message;
 
     private Authenticator authenticator;
+    private ClassLoader classloader;
 
     private CompatUpdater() {
         ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
         read = lock.readLock();
         write = lock.writeLock();
+    }
+
+    public ClassLoader getClassLoader() {
+        return classloader == null ? ClassLoader.getSystemClassLoader() : classloader;
     }
 
     public void register(CompatApp app) {
@@ -224,7 +232,7 @@ public final class CompatUpdater {
         ExecutorService executor = Executors.newSingleThreadExecutor();
         executor.submit(() -> {
             String version;
-            File jarFile;
+            Path jarFile;
             read.lock();
             try {
                 version = githubVersion;
@@ -256,28 +264,27 @@ public final class CompatUpdater {
                     authenticator.authenticate(connection);
                 }
                 connection.connect();
-                InputStream input = connection.getInputStream();
-                if (jarFile.exists()) {
-                    jarFile.delete();
-                }
-                Files.createFolder(jarFile.getParentFile());
-                int length = connection.getContentLength();
-                int prev = -1;
-                int perc = 0;
-                int current = 0;
-                OutputStream output = new FileOutputStream(jarFile);
-                while (current != length) {
-                    output.write(input.read());
-                    current += 1;
-                    perc = (int) ((current * 10D) / length);
-                    if (prev != perc) {
-                        prev = perc;
-                        System.out.println("Updating vCompat... (" + current + " / " + length + ")");
+                try (InputStream input = connection.getInputStream()) {
+                    Files.deleteIfExists(jarFile);
+                    if (!Files.exists(directory)) {
+                        Files.createDirectories(directory);
+                    }
+                    int length = connection.getContentLength();
+                    int prev = -1;
+                    int perc = 0;
+                    int current = 0;
+                    try (OutputStream output = new FileOutputStream(jarFile.toFile())) {
+                        while (current != length) {
+                            output.write(input.read());
+                            current += 1;
+                            perc = (int) ((current * 10D) / length);
+                            if (prev != perc) {
+                                prev = perc;
+                                System.out.println("Updating vCompat... (" + current + " / " + length + ")");
+                            }
+                        }
                     }
                 }
-                output.flush();
-                output.close();
-                input.close();
                 connection.disconnect();
                 setState(State.SUCCESS);
                 System.out.println("Updated vCompat successfully!");
@@ -326,20 +333,21 @@ public final class CompatUpdater {
     }
 
     private void loadCompatLib() {
-        URLClassLoader loader = (URLClassLoader) ClassLoader.getSystemClassLoader();
-        File current;
+        Path current;
         read.lock();
         try {
             current = file;
         } finally {
             read.unlock();
         }
+        ClassLoader loader = ClassLoader.getSystemClassLoader();
         try {
-            Method method = URLClassLoader.class.getDeclaredMethod("addUrl", URL.class);
-            boolean flag = method.isAccessible();
+            if (!(loader instanceof URLClassLoader)) {
+                loader = getClass().getClassLoader();
+            }
+            Method method = URLClassLoader.class.getDeclaredMethod("addURL", URL.class);
             method.setAccessible(true);
-            method.invoke(loader, current.toURI().toURL());
-            method.setAccessible(flag);
+            method.invoke(loader, current.toUri().toURL());
         } catch (Exception exp) {
             setFailed(exp);
             return;
@@ -347,29 +355,36 @@ public final class CompatUpdater {
     }
 
     private int readCurrentVersion() {
-        if (!file.exists()) {
+        File jarFile;
+        read.lock();
+        try {
+            jarFile = file.toFile();
+        } finally {
+            read.unlock();
+        }
+        if (!jarFile.exists()) {
             return 0;
         }
-        try (JarFile jar = new JarFile(file)) {
+        try (JarFile jar = new JarFile(jarFile)) {
             JarEntry entry = jar.getJarEntry("META-INF/maven/net.sourcewriters.minecraft/vcompat/pom.properties");
             if (entry == null) {
                 return 0;
             }
-            BufferedReader reader = new BufferedReader(new InputStreamReader(jar.getInputStream(entry)));
-            String line;
             int version = 0;
-            while ((line = reader.readLine()) != null) {
-                if (!line.contains("=")) {
-                    continue;
-                }
-                String[] parts = line.split("=", 2);
-                if (parts[0].equals("version")) {
-                    line = parts[1];
-                    version = Integer.valueOf(parts[1].split("\\.", 2)[0]);
-                    break;
+            String line;
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(jar.getInputStream(entry)))) {
+                while ((line = reader.readLine()) != null) {
+                    if (!line.contains("=")) {
+                        continue;
+                    }
+                    String[] parts = line.split("=", 2);
+                    if (parts[0].equals("version")) {
+                        line = parts[1];
+                        version = Integer.valueOf(parts[1].split("\\.", 2)[0]);
+                        break;
+                    }
                 }
             }
-            reader.close();
             write.lock();
             try {
                 exactVersion = line;
