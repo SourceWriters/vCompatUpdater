@@ -6,6 +6,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
@@ -15,8 +17,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 import com.syntaxphoenix.syntaxapi.json.JsonArray;
 import com.syntaxphoenix.syntaxapi.json.JsonObject;
@@ -27,8 +29,6 @@ import com.syntaxphoenix.syntaxapi.net.http.Request;
 import com.syntaxphoenix.syntaxapi.net.http.RequestType;
 import com.syntaxphoenix.syntaxapi.net.http.Response;
 import com.syntaxphoenix.syntaxapi.net.http.StandardContentType;
-import com.syntaxphoenix.syntaxapi.reflection.AbstractReflect;
-import com.syntaxphoenix.syntaxapi.reflection.Reflect;
 import com.syntaxphoenix.syntaxapi.utils.java.Files;
 
 public final class CompatUpdater {
@@ -37,8 +37,6 @@ public final class CompatUpdater {
 
     private static final String GITHUB_RELEASE = "https://api.github.com/repos/SourceWriters/vCompat/releases/tags/%s";
     private static final String GITHUB_TAGS = "https://api.github.com/repos/SourceWriters/vCompat/tags";
-
-    private final ExecutorService updater = Executors.newSingleThreadExecutor();
 
     private final HashMap<String, CompatApp> apps = new HashMap<>();
     private final Lock read, write;
@@ -54,6 +52,8 @@ public final class CompatUpdater {
 
     private Reason reason;
     private String message;
+
+    private Authenticator authenticator;
 
     private CompatUpdater() {
         ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
@@ -147,6 +147,15 @@ public final class CompatUpdater {
         }
     }
 
+    public void setAuthenticator(Authenticator authenticator) {
+        write.lock();
+        try {
+            this.authenticator = authenticator;
+        } finally {
+            write.unlock();
+        }
+    }
+
     private void setVersion(int version) {
         write.lock();
         try {
@@ -212,7 +221,8 @@ public final class CompatUpdater {
     }
 
     private void downloadNewVersion() {
-        updater.submit(() -> {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        executor.submit(() -> {
             String version;
             File jarFile;
             read.lock();
@@ -237,35 +247,40 @@ public final class CompatUpdater {
                         return;
                     }
                     loadCompatLib();
+                    setState(State.SUCCESS);
                     updateAll();
                     return;
                 }
                 HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-                connection.addRequestProperty("Accept", "application/octet-stream");
+                if (authenticator != null) {
+                    authenticator.authenticate(connection);
+                }
                 connection.connect();
-                InputStream stream = connection.getInputStream();
-                FileOutputStream output = new FileOutputStream(jarFile);
+                InputStream input = connection.getInputStream();
                 if (jarFile.exists()) {
                     jarFile.delete();
                 }
-                Files.createFile(jarFile);
-                Informer inform = new Informer();
-                inform.length = connection.getContentLength();
-                while (inform.current != inform.length) {
-                    int value = inform.length - inform.current;
-                    if (value > 16) {
-                        value = 16;
+                Files.createFolder(jarFile.getParentFile());
+                int length = connection.getContentLength();
+                int prev = -1;
+                int perc = 0;
+                int current = 0;
+                OutputStream output = new FileOutputStream(jarFile);
+                while (current != length) {
+                    output.write(input.read());
+                    current += 1;
+                    perc = (int) ((current * 10D) / length);
+                    if (prev != perc) {
+                        prev = perc;
+                        System.out.println("Updating vCompat... (" + current + " / " + length + ")");
                     }
-                    inform.current += value;
-                    byte[] array = new byte[value];
-                    stream.read(array);
-                    output.write(array);
                 }
                 output.flush();
                 output.close();
-                stream.close();
+                input.close();
                 connection.disconnect();
                 setState(State.SUCCESS);
+                System.out.println("Updated vCompat successfully!");
                 write.lock();
                 try {
                     exactVersion = version;
@@ -274,95 +289,73 @@ public final class CompatUpdater {
                 }
             } catch (IOException exp) {
                 setFailed(exp);
+                updateAll();
+                return;
             }
             loadCompatLib();
             updateAll();
         });
+        executor.submit(() -> executor.shutdown());
     }
 
-    private String getAssetUrl(String version) throws IOException {
-        Response response = new Request(RequestType.GET).header("Accept", "application/vnd.github.v3+json")
-            .execute(String.format(GITHUB_RELEASE, 'v' + version), StandardContentType.JSON);
-        if (response.getCode() != 200) {
+    private String getAssetUrl(String version) {
+        try {
+            Request request = new Request(RequestType.GET).header("Accept", "application/vnd.github.v3+json");
+            if (authenticator != null) {
+                authenticator.authenticate(request);
+            }
+            Response response = request.execute(String.format(GITHUB_RELEASE, 'v' + version), StandardContentType.JSON);
+            if (response.getCode() != 200) {
+                return null;
+            }
+            JsonObject object = (JsonObject) response.getResponseAsJson();
+            JsonArray array = (JsonArray) object.get("assets");
+            for (JsonValue<?> value : array) {
+                JsonObject asset = (JsonObject) value;
+                String name = (String) asset.get("name").getValue();
+                if (name.startsWith("vcompat") && name.endsWith(".jar")) {
+                    return (String) asset.get("browser_download_url").getValue();
+                }
+            }
+            return null;
+        } catch (IOException exp) {
+            setFailed(exp);
+            updateAll();
             return null;
         }
-        JsonObject object = (JsonObject) response.getResponseAsJson();
-        if (!object.has("assets", ValueType.ARRAY)) {
-            return null;
-        }
-        JsonArray array = (JsonArray) object.get("assets");
-        if (array.size() == 0) {
-            return null;
-        }
-        for (JsonValue<?> value : array) {
-            if (value.getType() != ValueType.OBJECT) {
-                continue;
-            }
-            JsonObject asset = (JsonObject) value;
-            if (!asset.has("name", ValueType.STRING)) {
-                continue;
-            }
-            String name = (String) asset.get("name").getValue();
-            if (name.startsWith("vcompat") && name.endsWith(".jar") && asset.has("url", ValueType.STRING)) {
-                return (String) asset.get("url").getValue();
-            }
-        }
-        return null;
     }
 
     private void loadCompatLib() {
-        ClassLoader loader = findClassLoader();
-        if (loader == null) {
-            loader = getClass().getClassLoader();
+        URLClassLoader loader = (URLClassLoader) ClassLoader.getSystemClassLoader();
+        File current;
+        read.lock();
+        try {
+            current = file;
+        } finally {
+            read.unlock();
         }
         try {
-            File current;
-            read.lock();
-            try {
-                current = file;
-            } finally {
-                read.unlock();
-            }
-            AbstractReflect reflect = new Reflect(URLClassLoader.class).searchMethod("add", "addUrl", URL.class);
-            if (!reflect.getOwner().isInstance(loader)) {
-                throw new IllegalArgumentException("Can't load vCompat with '" + loader.getClass().getName() + "' Classloader!");
-            }
-            reflect.execute(loader, "add", current.toURI().toURL());
+            Method method = URLClassLoader.class.getDeclaredMethod("addUrl", URL.class);
+            boolean flag = method.isAccessible();
+            method.setAccessible(true);
+            method.invoke(loader, current.toURI().toURL());
+            method.setAccessible(flag);
         } catch (Exception exp) {
             setFailed(exp);
             return;
         }
     }
 
-    private ClassLoader findClassLoader() {
-        ClassLoader loader = null;
-        if (getAmount() == 0) {
-            return loader;
-        }
-        read.lock();
-        try {
-            for (CompatApp app : apps.values()) {
-                ClassLoader tmp = app.getClass().getClassLoader().getParent();
-                if (tmp != loader) {
-                    loader = tmp;
-                }
-            }
-        } finally {
-            read.unlock();
-        }
-        return loader;
-    }
-
     private int readCurrentVersion() {
         if (!file.exists()) {
             return 0;
         }
-        try (ZipFile zip = new ZipFile(file)) {
-            ZipEntry entry = zip.getEntry("META-INF/maven/net.sourcewriters.minecraft/vcompat/pom.properties");
+        try (JarFile jar = new JarFile(file)) {
+            JarEntry entry = jar.getJarEntry("META-INF/maven/net.sourcewriters.minecraft/vcompat/pom.properties");
             if (entry == null) {
                 return 0;
             }
-            BufferedReader reader = new BufferedReader(new InputStreamReader(zip.getInputStream(entry)));
+            BufferedReader reader = new BufferedReader(new InputStreamReader(jar.getInputStream(entry)));
             String line;
             int version = 0;
             while ((line = reader.readLine()) != null) {
@@ -371,6 +364,7 @@ public final class CompatUpdater {
                 }
                 String[] parts = line.split("=", 2);
                 if (parts[0].equals("version")) {
+                    line = parts[1];
                     version = Integer.valueOf(parts[1].split("\\.", 2)[0]);
                     break;
                 }
@@ -391,20 +385,28 @@ public final class CompatUpdater {
 
     private boolean readGithubVersion() {
         Request request = new Request(RequestType.GET).modifyUrl(true).header("Accept", "application/vnd.github.v3+json");
+        if (authenticator != null) {
+            authenticator.authenticate(request);
+        }
         int requested = getRequested(false);
         int previous = 0;
         int page = 0;
         boolean found = false;
         try {
-            while (requested != previous || !found) {
-                Response response = request.clearParameters().parameter("per_page", "20").parameter("page", new JsonInteger(page++))
-                    .execute(GITHUB_TAGS, StandardContentType.JSON);
+            while (requested != previous && !found) {
+                Response response = request.clearParameters().parameter("per_page", "40").parameter("page", new JsonInteger(page++))
+                    .modifyUrl(true).execute(GITHUB_TAGS, StandardContentType.URL_ENCODED);
                 if (response.getCode() == 404) {
                     previous = requested;
                     requested = getRequested(true);
                     continue;
                 }
-                JsonArray array = (JsonArray) response.getResponseAsJson();
+                JsonValue<?> rawValue = response.getResponseAsJson();
+                if (response.getCode() == 403) {
+                    setFailed(new IllegalStateException((String) ((JsonObject) rawValue).get("message").getValue()));
+                    return false;
+                }
+                JsonArray array = (JsonArray) rawValue;
                 if (array.isEmpty()) {
                     previous = requested;
                     requested = getRequested(true);

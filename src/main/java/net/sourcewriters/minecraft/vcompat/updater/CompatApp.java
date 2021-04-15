@@ -19,11 +19,11 @@ public abstract class CompatApp {
         return version;
     }
     
-    protected final void start() {
+    public final void start() {
         CompatUpdater.INSTANCE.run();
     }
     
-    protected final void stop() {
+    public final void stop() {
         CompatUpdater.INSTANCE.unregister(this);
     }
     
