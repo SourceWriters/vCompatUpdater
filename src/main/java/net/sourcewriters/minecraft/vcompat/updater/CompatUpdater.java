@@ -73,11 +73,18 @@ public final class CompatUpdater {
         String id = app.getId();
         if (id == null || isRegistered(id)) {
             app.onFailed(Reason.ALREADY_REGISTERED, "Your App '" + id + "' is already registered!");
+            app.state = AppState.FAILED;
+            return;
+        }
+        if (app.state == AppState.FAILED) {
             return;
         }
         write.lock();
         try {
             apps.put(id, app);
+            if (app.state != AppState.STARTED) {
+                app.state = AppState.KNOWN;
+            }
             int tmp = app.getTargetVersion();
             if (requested < tmp) {
                 requested = tmp;
@@ -85,19 +92,25 @@ public final class CompatUpdater {
         } finally {
             write.unlock();
         }
+        if (app.state != AppState.STARTED) {
+            return;
+        }
         read.lock();
         try {
             State state = getState();
             if (state == State.SUCCESS) {
                 if (app.getTargetVersion() == version) {
                     app.onReady();
+                    app.state = AppState.RUNNING;
                     return;
                 }
                 app.onFailed(Reason.INCOMPATIBLE, "The version of vCompat that is installed is incompatible with the app '" + id + "'!");
+                app.state = AppState.FAILED;
                 return;
             }
             if (state == State.FAILED) {
                 app.onFailed(reason, message);
+                app.state = AppState.FAILED;
                 return;
             }
         } finally {
@@ -109,6 +122,7 @@ public final class CompatUpdater {
         String id = app.getId();
         if (id == null || !isRegistered(id)) {
             app.onShutdown();
+            app.state = AppState.NONE;
             return;
         }
         write.lock();
@@ -204,8 +218,12 @@ public final class CompatUpdater {
         }
     }
 
-    public void run() {
+    public void run(CompatApp app) {
+        if (app.state == AppState.KNOWN) {
+            app.state = AppState.STARTED;
+        }
         if (getState() != State.NONE || getAmount() == 0) {
+            updateAll();
             return;
         }
         setState(State.UPDATING);
@@ -509,11 +527,16 @@ public final class CompatUpdater {
         read.lock();
         try {
             for (CompatApp app : apps.values()) {
+                if (app.state != AppState.STARTED) {
+                    continue;
+                }
                 if (state == State.FAILED) {
                     app.onFailed(reason, message);
+                    app.state = AppState.FAILED;
                     continue;
                 }
                 app.onReady();
+                app.state = AppState.RUNNING;
             }
         } finally {
             read.unlock();
