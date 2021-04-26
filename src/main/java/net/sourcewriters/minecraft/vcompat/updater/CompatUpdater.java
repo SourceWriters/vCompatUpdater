@@ -223,7 +223,9 @@ public final class CompatUpdater {
             app.state = AppState.STARTED;
         }
         if (getState() != State.NONE || getAmount() == 0) {
-            updateAll();
+            if (getState() != State.UPDATING) {
+                updateAll();
+            }
             return;
         }
         setState(State.UPDATING);
