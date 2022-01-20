@@ -7,7 +7,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
@@ -57,7 +56,7 @@ public final class CompatUpdater {
     private String message;
 
     private Authenticator authenticator;
-    private ClassLoader classloader;
+    private CompatClassLoader classLoader;
 
     private CompatUpdater() {
         ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
@@ -65,8 +64,8 @@ public final class CompatUpdater {
         write = lock.writeLock();
     }
 
-    public ClassLoader getClassLoader() {
-        return classloader == null ? ClassLoader.getSystemClassLoader() : classloader;
+    public CompatClassLoader getClassLoader() {
+        return classLoader == null ? new CompatClassLoader(ClassLoader.getSystemClassLoader()) : classLoader;
     }
 
     public void register(CompatApp app) {
@@ -360,18 +359,18 @@ public final class CompatUpdater {
         } finally {
             read.unlock();
         }
-        ClassLoader loader = ClassLoader.getSystemClassLoader();
+        URL url = null;
         try {
-            if (!(loader instanceof URLClassLoader)) {
-                loader = getClass().getClassLoader();
-            }
-            Method method = URLClassLoader.class.getDeclaredMethod("addURL", URL.class);
-            method.setAccessible(true);
-            method.invoke(loader, current.toUri().toURL());
-        } catch (Exception exp) {
+            url = current.toUri().toURL();
+        } catch(Exception exp) {
             setFailed(exp);
             return;
         }
+        CompatClassLoader loader = getClassLoader();
+        if(loader.hasUrl(url)) {
+            return;
+        }
+        loader.loadUrl(url);
     }
 
     private int readCurrentVersion() {
@@ -543,6 +542,33 @@ public final class CompatUpdater {
         } finally {
             read.unlock();
         }
+    }
+
+    private class CompatClassLoader extends URLClassLoader {
+
+        public CompatClassLoader(ClassLoader parent) {
+            super("vCompat", new URL[0], parent);
+        }
+
+        public void loadUrl(URL url) {
+            if(hasUrl(url)) {
+                return;
+            }
+            addURL(url);
+        }
+
+        public boolean hasUrl(URL url) {
+            if(url == null) {
+                return false;
+            }
+            for(URL found : getURLs()) {
+                if(found.toString().equals(url.toString())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
     }
 
 }
