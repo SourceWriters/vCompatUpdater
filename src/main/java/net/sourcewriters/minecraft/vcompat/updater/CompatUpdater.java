@@ -65,7 +65,7 @@ public final class CompatUpdater {
     }
 
     public CompatClassLoader getClassLoader() {
-        return classLoader == null ? new CompatClassLoader(ClassLoader.getSystemClassLoader()) : classLoader;
+        return classLoader == null ? new CompatClassLoader(getClass().getClassLoader()) : classLoader;
     }
 
     public void register(CompatApp app) {
@@ -129,6 +129,47 @@ public final class CompatUpdater {
             apps.remove(id);
         } finally {
             write.unlock();
+        }
+        read.lock();
+        try {
+            if(apps.isEmpty()) {
+                shutdown();
+            } 
+        } finally {
+            read.unlock();
+        }
+    }
+
+    private void shutdown() {
+        try {
+            Class<?> control = getClass("net.sourcewriters.minecraft.vcompat.reflection.VersionControl");
+            if (control != null) {
+                control.getMethod("shutdown").invoke(control.getMethod("get").invoke(null));
+                return;
+            }
+            Class<?> provider = getClass("net.sourcewriters.minecraft.vcompat.VersionCompatProvider");
+            control = getClass("net.sourcewriters.minecraft.vcompat.provider.VersionControl");
+            if(provider != null && control != null) {
+                Object providerObj = provider.getMethod("get").invoke(null);
+                control.getMethod("shutdown").invoke(provider.getMethod("getControl").invoke(providerObj));
+            }
+        } catch(Exception e) {
+            // Ignore
+        }
+        try {
+            classLoader.close();
+        } catch (IOException e) {
+            // Ignore
+        }
+        classLoader = null;
+        state = State.NONE;
+    }
+
+    private Class<?> getClass(String name) {
+        try {
+            return Class.forName(name, false, ClassLoader.getSystemClassLoader());
+        } catch (ClassNotFoundException e) {
+            return null;
         }
     }
 
