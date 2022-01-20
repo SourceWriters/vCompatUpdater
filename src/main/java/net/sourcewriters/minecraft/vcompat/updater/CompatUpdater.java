@@ -7,6 +7,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodHandles.Lookup;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
@@ -14,6 +20,8 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -31,6 +39,7 @@ import com.syntaxphoenix.syntaxapi.net.http.Request;
 import com.syntaxphoenix.syntaxapi.net.http.RequestType;
 import com.syntaxphoenix.syntaxapi.net.http.Response;
 import com.syntaxphoenix.syntaxapi.net.http.StandardContentType;
+import com.syntaxphoenix.syntaxapi.utils.java.Exceptions;
 
 public final class CompatUpdater {
 
@@ -56,16 +65,11 @@ public final class CompatUpdater {
     private String message;
 
     private Authenticator authenticator;
-    private CompatClassLoader classLoader;
 
     private CompatUpdater() {
         ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
         read = lock.readLock();
         write = lock.writeLock();
-    }
-
-    public CompatClassLoader getClassLoader() {
-        return classLoader == null ? new CompatClassLoader(getClass().getClassLoader()) : classLoader;
     }
 
     public void register(CompatApp app) {
@@ -103,7 +107,8 @@ public final class CompatUpdater {
                     app.state = AppState.RUNNING;
                     return;
                 }
-                app.onFailed(Reason.INCOMPATIBLE, "The version of vCompat that is installed is incompatible with the app '" + id + "'!");
+                app.onFailed(Reason.INCOMPATIBLE,
+                        "The version of vCompat that is installed is incompatible with the app '" + id + "'!");
                 app.state = AppState.FAILED;
                 return;
             }
@@ -132,9 +137,9 @@ public final class CompatUpdater {
         }
         read.lock();
         try {
-            if(apps.isEmpty()) {
+            if (apps.isEmpty()) {
                 shutdown();
-            } 
+            }
         } finally {
             read.unlock();
         }
@@ -149,19 +154,20 @@ public final class CompatUpdater {
             }
             Class<?> provider = getClass("net.sourcewriters.minecraft.vcompat.VersionCompatProvider");
             control = getClass("net.sourcewriters.minecraft.vcompat.provider.VersionControl");
-            if(provider != null && control != null) {
+            if (provider != null && control != null) {
                 Object providerObj = provider.getMethod("get").invoke(null);
                 control.getMethod("shutdown").invoke(provider.getMethod("getControl").invoke(providerObj));
             }
-        } catch(Exception e) {
+        } catch (Exception e) {
             // Ignore
         }
-        try {
-            classLoader.close();
-        } catch (IOException e) {
-            // Ignore
+        if(urlClassLoader != null && urlClassLoader instanceof PrivateClassLoader) {
+            try {
+                urlClassLoader.close();
+            } catch (IOException e) {
+            }
+            urlClassLoader = null;
         }
-        classLoader = null;
         state = State.NONE;
     }
 
@@ -247,7 +253,7 @@ public final class CompatUpdater {
         }
     }
 
-    private void setFailed(Exception exp) {
+    private void setFailed(Throwable exp) {
         write.lock();
         try {
             state = State.FAILED;
@@ -403,15 +409,71 @@ public final class CompatUpdater {
         URL url = null;
         try {
             url = current.toUri().toURL();
-        } catch(Exception exp) {
+        } catch (Exception exp) {
             setFailed(exp);
             return;
         }
-        CompatClassLoader loader = getClassLoader();
-        if(loader.hasUrl(url)) {
+        URLClassLoader loader = getUrlClassLoader();
+        try {
+            Method method = findMethod(URLClassLoader.class, "addURL", URL.class);
+            method.setAccessible(true);
+            method.invoke(loader, url);
+            method.setAccessible(false);
+            return;
+        } catch (Throwable ignore) {}
+        urlClassLoader = new PrivateClassLoader(url, loader);
+    } 
+
+    private class PrivateClassLoader extends URLClassLoader {
+        public PrivateClassLoader(URL url, ClassLoader parent) {
+            super(new URL[] {url}, parent);
+        }
+    }
+
+    private Method findMethod(Class<?> target, String method, Class<?>... classes) throws NoSuchMethodException {
+        try {
+            return target.getMethod(method, classes);
+        } catch(NoSuchMethodException i) {
+            return target.getDeclaredMethod(method, classes);
+        }
+    }
+
+    private final ClassLoader[] classLoaders = new ClassLoader[] {
+            ClassLoader.getSystemClassLoader(),
+            ClassLoader.getPlatformClassLoader(),
+            getClass().getClassLoader()
+    };
+
+    private URLClassLoader urlClassLoader;
+
+    private URLClassLoader getUrlClassLoader() {
+        if (urlClassLoader != null) {
+            return urlClassLoader;
+        }
+        ArrayList<ClassLoader> list = new ArrayList<ClassLoader>();
+        for (ClassLoader classLoader : classLoaders) {
+            // Try parents first
+            collectParents(list, classLoader);
+            for (ClassLoader parent : list) {
+                if (!(parent instanceof URLClassLoader)) {
+                    continue;
+                }
+                return urlClassLoader = (URLClassLoader) parent;
+            }
+            if(classLoader instanceof URLClassLoader) {
+                return urlClassLoader = (URLClassLoader) classLoader;
+            }
+            list.clear();
+        }
+        throw new IllegalStateException("Could not find URLClassLoader");
+    }
+
+    private void collectParents(Collection<ClassLoader> parents, ClassLoader loader) {
+        if (loader.getParent() == null) {
             return;
         }
-        loader.loadUrl(url);
+        collectParents(parents, loader.getParent());
+        parents.add(loader.getParent());
     }
 
     private int readCurrentVersion() {
@@ -459,7 +521,8 @@ public final class CompatUpdater {
     }
 
     private boolean readGithubVersion() {
-        Request request = new Request(RequestType.GET).modifyUrl(true).header("Accept", "application/vnd.github.v3+json");
+        Request request = new Request(RequestType.GET).modifyUrl(true).header("Accept",
+                "application/vnd.github.v3+json");
         if (authenticator != null) {
             authenticator.authenticate(request);
         }
@@ -469,8 +532,9 @@ public final class CompatUpdater {
         boolean found = false;
         try {
             while (requested != previous && !found) {
-                Response response = request.clearParameters().parameter("per_page", "40").parameter("page", new JsonInteger(page++))
-                    .modifyUrl(true).execute(GITHUB_TAGS, StandardContentType.URL_ENCODED);
+                Response response = request.clearParameters().parameter("per_page", "40")
+                        .parameter("page", new JsonInteger(page++))
+                        .modifyUrl(true).execute(GITHUB_TAGS, StandardContentType.URL_ENCODED);
                 if (response.getCode() == 404) {
                     previous = requested;
                     requested = getRequested(true);
@@ -583,33 +647,6 @@ public final class CompatUpdater {
         } finally {
             read.unlock();
         }
-    }
-
-    private class CompatClassLoader extends URLClassLoader {
-
-        public CompatClassLoader(ClassLoader parent) {
-            super("vCompat", new URL[0], parent);
-        }
-
-        public void loadUrl(URL url) {
-            if(hasUrl(url)) {
-                return;
-            }
-            addURL(url);
-        }
-
-        public boolean hasUrl(URL url) {
-            if(url == null) {
-                return false;
-            }
-            for(URL found : getURLs()) {
-                if(found.toString().equals(url.toString())) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        
     }
 
 }
