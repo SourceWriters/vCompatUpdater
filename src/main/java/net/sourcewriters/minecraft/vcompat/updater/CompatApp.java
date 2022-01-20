@@ -33,7 +33,7 @@ public abstract class CompatApp {
         return state;
     }
 
-    protected void onFailed(Reason reason, String message) {}
+    protected void onFailed(Reason reason, String message, Throwable throwable) {}
 
     protected void onReady() {}
 

@@ -7,12 +7,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
@@ -39,7 +36,8 @@ import com.syntaxphoenix.syntaxapi.net.http.Request;
 import com.syntaxphoenix.syntaxapi.net.http.RequestType;
 import com.syntaxphoenix.syntaxapi.net.http.Response;
 import com.syntaxphoenix.syntaxapi.net.http.StandardContentType;
-import com.syntaxphoenix.syntaxapi.utils.java.Exceptions;
+
+import sun.misc.Unsafe;
 
 public final class CompatUpdater {
 
@@ -54,6 +52,17 @@ public final class CompatUpdater {
     private final Path directory = Paths.get("plugins/vCompat");
     private final Path file = directory.resolve("vCompat.jar");
 
+    private final ClassLoader[] classLoaders = new ClassLoader[] {
+        Thread.currentThread().getContextClassLoader(),
+        ClassLoader.getSystemClassLoader(),
+        ClassLoader.getPlatformClassLoader(),
+        getClass().getClassLoader()
+    };
+
+    private Unsafe unsafe;
+
+    private URLClassLoader urlClassLoader;
+
     private String githubVersion;
     private String exactVersion;
 
@@ -63,6 +72,7 @@ public final class CompatUpdater {
 
     private Reason reason;
     private String message;
+    private Throwable exception;
 
     private Authenticator authenticator;
 
@@ -75,7 +85,7 @@ public final class CompatUpdater {
     public void register(CompatApp app) {
         String id = app.getId();
         if (id == null || isRegistered(id)) {
-            app.onFailed(Reason.ALREADY_REGISTERED, "Your App '" + id + "' is already registered!");
+            app.onFailed(Reason.ALREADY_REGISTERED, "Your App '" + id + "' is already registered!", null);
             app.state = AppState.FAILED;
             return;
         }
@@ -107,13 +117,13 @@ public final class CompatUpdater {
                     app.state = AppState.RUNNING;
                     return;
                 }
-                app.onFailed(Reason.INCOMPATIBLE,
-                        "The version of vCompat that is installed is incompatible with the app '" + id + "'!");
+                app.onFailed(Reason.INCOMPATIBLE, "The version of vCompat that is installed is incompatible with the app '" + id + "'!",
+                    null);
                 app.state = AppState.FAILED;
                 return;
             }
             if (state == State.FAILED) {
-                app.onFailed(reason, message);
+                app.onFailed(reason, message, exception);
                 app.state = AppState.FAILED;
                 return;
             }
@@ -160,13 +170,6 @@ public final class CompatUpdater {
             }
         } catch (Exception e) {
             // Ignore
-        }
-        if(urlClassLoader != null && urlClassLoader instanceof PrivateClassLoader) {
-            try {
-                urlClassLoader.close();
-            } catch (IOException e) {
-            }
-            urlClassLoader = null;
         }
         state = State.NONE;
     }
@@ -259,6 +262,7 @@ public final class CompatUpdater {
             state = State.FAILED;
             reason = Reason.UNKNOWN;
             message = exp.getMessage();
+            exception = exp;
         } finally {
             write.unlock();
         }
@@ -415,36 +419,53 @@ public final class CompatUpdater {
         }
         URLClassLoader loader = getUrlClassLoader();
         try {
-            Method method = findMethod(URLClassLoader.class, "addURL", URL.class);
-            method.setAccessible(true);
-            method.invoke(loader, url);
-            method.setAccessible(false);
+            invoke(loader, findMethod(URLClassLoader.class, "addURL", URL.class), url);
+        } catch (Throwable ignore) {
+            setFailed(ignore);
             return;
-        } catch (Throwable ignore) {}
-        urlClassLoader = new PrivateClassLoader(url, loader);
-    } 
+        }
+    }
 
-    private class PrivateClassLoader extends URLClassLoader {
-        public PrivateClassLoader(URL url, ClassLoader parent) {
-            super(new URL[] {url}, parent);
+    private void invoke(Object target, Method method, Object... arguments) throws Throwable {
+        Lookup lookup = (Lookup) getStaticValue(Lookup.class, "IMPL_LOOKUP");
+        Object[] args = new Object[arguments.length + 1];
+        args[0] = target;
+        System.arraycopy(arguments, 0, args, 1, arguments.length);
+        lookup.unreflect(method).invokeWithArguments(args);
+    }
+
+    private Object getStaticValue(Class<?> clazz, String field) throws Throwable {
+        Field valueField = findField(clazz, field);
+        Unsafe unsafe = getUnsafe();
+        Object base = unsafe.staticFieldBase(valueField);
+        long offset = unsafe.staticFieldOffset(valueField);
+        return unsafe.getObjectVolatile(base, offset);
+    }
+
+    private Unsafe getUnsafe() throws NoSuchFieldException, IllegalAccessException {
+        if (unsafe != null) {
+            return unsafe;
+        }
+        Field unsafeField = findField(Unsafe.class, "theUnsafe");
+        unsafeField.setAccessible(true);
+        return unsafe = (Unsafe) unsafeField.get(null);
+    }
+
+    private Field findField(Class<?> target, String field) throws NoSuchFieldException {
+        try {
+            return target.getField(field);
+        } catch (NoSuchFieldException i) {
+            return target.getDeclaredField(field);
         }
     }
 
     private Method findMethod(Class<?> target, String method, Class<?>... classes) throws NoSuchMethodException {
         try {
             return target.getMethod(method, classes);
-        } catch(NoSuchMethodException i) {
+        } catch (NoSuchMethodException i) {
             return target.getDeclaredMethod(method, classes);
         }
     }
-
-    private final ClassLoader[] classLoaders = new ClassLoader[] {
-            ClassLoader.getSystemClassLoader(),
-            ClassLoader.getPlatformClassLoader(),
-            getClass().getClassLoader()
-    };
-
-    private URLClassLoader urlClassLoader;
 
     private URLClassLoader getUrlClassLoader() {
         if (urlClassLoader != null) {
@@ -460,7 +481,7 @@ public final class CompatUpdater {
                 }
                 return urlClassLoader = (URLClassLoader) parent;
             }
-            if(classLoader instanceof URLClassLoader) {
+            if (classLoader instanceof URLClassLoader) {
                 return urlClassLoader = (URLClassLoader) classLoader;
             }
             list.clear();
@@ -521,8 +542,7 @@ public final class CompatUpdater {
     }
 
     private boolean readGithubVersion() {
-        Request request = new Request(RequestType.GET).modifyUrl(true).header("Accept",
-                "application/vnd.github.v3+json");
+        Request request = new Request(RequestType.GET).modifyUrl(true).header("Accept", "application/vnd.github.v3+json");
         if (authenticator != null) {
             authenticator.authenticate(request);
         }
@@ -532,9 +552,8 @@ public final class CompatUpdater {
         boolean found = false;
         try {
             while (requested != previous && !found) {
-                Response response = request.clearParameters().parameter("per_page", "40")
-                        .parameter("page", new JsonInteger(page++))
-                        .modifyUrl(true).execute(GITHUB_TAGS, StandardContentType.URL_ENCODED);
+                Response response = request.clearParameters().parameter("per_page", "40").parameter("page", new JsonInteger(page++))
+                    .modifyUrl(true).execute(GITHUB_TAGS, StandardContentType.URL_ENCODED);
                 if (response.getCode() == 404) {
                     previous = requested;
                     requested = getRequested(true);
@@ -637,7 +656,7 @@ public final class CompatUpdater {
                     continue;
                 }
                 if (state == State.FAILED) {
-                    app.onFailed(reason, message);
+                    app.onFailed(reason, message, exception);
                     app.state = AppState.FAILED;
                     continue;
                 }
