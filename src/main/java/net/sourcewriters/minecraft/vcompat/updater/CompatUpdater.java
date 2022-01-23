@@ -642,7 +642,7 @@ public final class CompatUpdater {
             if (githubVersion == null) {
                 return true;
             }
-            return compare(githubVersion.split("."), exactVersion.split(".")) != 1;
+            return exactVersion != null && compare(githubVersion.split("."), exactVersion.split(".")) != 1;
         } finally {
             read.unlock();
         }
