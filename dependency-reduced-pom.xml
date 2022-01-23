@@ -4,7 +4,7 @@
   <groupId>net.sourcewriters.minecraft</groupId>
   <artifactId>vcompat-updater</artifactId>
   <name>vCompatUpdater</name>
-  <version>1.0.0</version>
+  <version>1.0.1</version>
   <build>
     <resources>
       <resource>
