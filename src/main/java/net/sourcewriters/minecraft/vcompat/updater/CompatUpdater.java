@@ -642,9 +642,30 @@ public final class CompatUpdater {
             if (githubVersion == null) {
                 return true;
             }
-            return githubVersion.equals(exactVersion);
+            return compare(githubVersion.split("."), exactVersion.split(".")) == 1;
         } finally {
             read.unlock();
+        }
+    }
+
+    private int compare(String[] version1, String[] version2) {
+        for (int i = 0; i < version1.length; i++) {
+            int v1 = parse(version1[i]);
+            int v2 = parse(version2[i]);
+            if (v1 > v2) {
+                return 1;
+            } else if (v1 < v2) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    private int parse(String string) {
+        try {
+            return Integer.parseInt(string);
+        } catch (NumberFormatException nfe) {
+            return 0;
         }
     }
 
