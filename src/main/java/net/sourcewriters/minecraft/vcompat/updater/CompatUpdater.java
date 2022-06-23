@@ -134,16 +134,19 @@ public final class CompatUpdater {
 
     public void unregister(CompatApp app) {
         String id = app.getId();
-        if (id == null || !isRegistered(id)) {
+        try {
+            if (id == null || !isRegistered(id)) {
+                return;
+            }
+            write.lock();
+            try {
+                apps.remove(id);
+            } finally {
+                write.unlock();
+            }
+        } finally {
             app.onShutdown();
             app.state = AppState.NONE;
-            return;
-        }
-        write.lock();
-        try {
-            apps.remove(id);
-        } finally {
-            write.unlock();
         }
         read.lock();
         try {
