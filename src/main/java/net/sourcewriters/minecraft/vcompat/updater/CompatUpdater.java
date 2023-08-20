@@ -427,6 +427,25 @@ public final class CompatUpdater {
             setFailed(ignore);
             return;
         }
+        setupCompatLib();
+    }
+
+    private void setupCompatLib() {
+        try {
+            Class<?> control = getClass("net.sourcewriters.minecraft.vcompat.reflection.VersionControl");
+            if (control != null) {
+                control.getMethod("get").invoke(null);
+                return;
+            }
+            Class<?> provider = getClass("net.sourcewriters.minecraft.vcompat.VersionCompatProvider");
+            control = getClass("net.sourcewriters.minecraft.vcompat.provider.VersionCompat");
+            if (provider != null && control != null) {
+                provider.getMethod("get").invoke(null);
+            }
+        } catch (Exception e) {
+            setFailed(e);
+            return;
+        }
     }
 
     private void invoke(Object target, Method method, Object... arguments) throws Throwable {
