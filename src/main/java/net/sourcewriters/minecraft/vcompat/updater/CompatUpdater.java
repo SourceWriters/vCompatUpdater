@@ -7,9 +7,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
@@ -17,8 +18,6 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -52,14 +51,8 @@ public final class CompatUpdater {
     private final Path directory = Paths.get("plugins/vCompat");
     private final Path file = directory.resolve("vCompat.jar");
 
-    private final ClassLoader[] classLoaders = new ClassLoader[] {
-        Thread.currentThread().getContextClassLoader(),
-        ClassLoader.getSystemClassLoader(),
-        ClassLoader.getPlatformClassLoader(),
-        getClass().getClassLoader()
-    };
-
-    private Unsafe unsafe;
+    private final Unsafe unsafe;
+    private final Lookup lookup;
 
     private URLClassLoader urlClassLoader;
 
@@ -80,6 +73,40 @@ public final class CompatUpdater {
         ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
         read = lock.readLock();
         write = lock.writeLock();
+        unsafe = retrieveUnsafe();
+        lookup = retrieveImplLookup();
+        if (lookup == null) {
+            return;
+        }
+        try {
+            WrappedURLClassLoader.setup(lookup);
+        } catch(Throwable e) {
+            setFailed(e);
+        }
+    }
+
+    private Unsafe retrieveUnsafe() {
+        try {
+            Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            return (Unsafe) unsafeField.get(null);
+        } catch (NoSuchFieldException | SecurityException | IllegalArgumentException | IllegalAccessException e) {
+            setFailed(e);
+            return null;
+        }
+    }
+
+    private Lookup retrieveImplLookup() {
+        if (unsafe == null) {
+            return null;
+        }
+        try {
+            Field lookupField = Lookup.class.getDeclaredField("IMPL_LOOKUP");
+            return (Lookup) unsafe.getObjectVolatile(unsafe.staticFieldBase(lookupField), unsafe.staticFieldOffset(lookupField));
+        } catch (SecurityException | NoSuchFieldException e) {
+            setFailed(e);
+            return null;
+        }
     }
 
     public void register(CompatApp app) {
@@ -159,30 +186,31 @@ public final class CompatUpdater {
     }
 
     private void shutdown() {
+        ClassLoader loader = urlClassLoader;
+        if (loader == null) {
+            return;
+        }
         try {
-            Class<?> control = getClass("net.sourcewriters.minecraft.vcompat.reflection.VersionControl");
+            Class<?> control = AccessHelper.getClass("net.sourcewriters.minecraft.vcompat.reflection.VersionControl", loader);
             if (control != null) {
-                control.getMethod("shutdown").invoke(control.getMethod("get").invoke(null));
+                Lookup controlLookup = MethodHandles.privateLookupIn(control, lookup);
+                Object controlObj = controlLookup.findStatic(control, "get", MethodType.methodType(control)).invoke();
+                controlLookup.findVirtual(control, "shutdown", MethodType.methodType(void.class)).invoke(controlObj);
                 return;
             }
-            Class<?> provider = getClass("net.sourcewriters.minecraft.vcompat.VersionCompatProvider");
-            control = getClass("net.sourcewriters.minecraft.vcompat.provider.VersionControl");
+            Class<?> provider = AccessHelper.getClass("net.sourcewriters.minecraft.vcompat.VersionCompatProvider", loader);
+            control = AccessHelper.getClass("net.sourcewriters.minecraft.vcompat.provider.VersionControl", loader);
             if (provider != null && control != null) {
-                Object providerObj = provider.getMethod("get").invoke(null);
-                control.getMethod("shutdown").invoke(provider.getMethod("getControl").invoke(providerObj));
+                Lookup providerLookup = MethodHandles.privateLookupIn(provider, lookup);
+                Object providerObj = providerLookup.findStatic(provider, "get", MethodType.methodType(provider)).invoke();
+                Object controlObj = providerLookup.findVirtual(provider, "getControl", MethodType.methodType(control)).invoke(providerObj);
+                MethodHandles.privateLookupIn(control, lookup).findVirtual(control, "shutdown", MethodType.methodType(void.class))
+                    .invoke(controlObj);
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             // Ignore
         }
         state = State.NONE;
-    }
-
-    private Class<?> getClass(String name) {
-        try {
-            return Class.forName(name, false, ClassLoader.getSystemClassLoader());
-        } catch (ClassNotFoundException e) {
-            return null;
-        }
     }
 
     public boolean isRegistered(String id) {
@@ -406,6 +434,9 @@ public final class CompatUpdater {
     }
 
     private void loadCompatLib() {
+        if (urlClassLoader != null) {
+            return;
+        }
         Path current;
         read.lock();
         try {
@@ -413,110 +444,25 @@ public final class CompatUpdater {
         } finally {
             read.unlock();
         }
-        URL url = null;
+        WrappedURLClassLoader classLoader = new WrappedURLClassLoader(findHighestURLClassLoader());
         try {
-            url = current.toUri().toURL();
-        } catch (Exception exp) {
-            setFailed(exp);
-            return;
-        }
-        URLClassLoader loader = getUrlClassLoader();
-        try {
-            invoke(loader, findMethod(URLClassLoader.class, "addURL", URL.class), url);
-        } catch (Throwable ignore) {
-            setFailed(ignore);
-            return;
-        }
-        setupCompatLib();
-    }
-
-    private void setupCompatLib() {
-        try {
-            Class<?> control = getClass("net.sourcewriters.minecraft.vcompat.reflection.VersionControl");
-            if (control != null) {
-                control.getMethod("get").invoke(null);
-                return;
-            }
-            Class<?> provider = getClass("net.sourcewriters.minecraft.vcompat.VersionCompatProvider");
-            control = getClass("net.sourcewriters.minecraft.vcompat.provider.VersionCompat");
-            if (provider != null && control != null) {
-                provider.getMethod("get").invoke(null);
-            }
-        } catch (Exception e) {
+            classLoader.addFile(current.toString());
+        } catch (Throwable e) {
             setFailed(e);
             return;
         }
     }
 
-    private void invoke(Object target, Method method, Object... arguments) throws Throwable {
-        Lookup lookup = (Lookup) getStaticValue(Lookup.class, "IMPL_LOOKUP");
-        Object[] args = new Object[arguments.length + 1];
-        args[0] = target;
-        System.arraycopy(arguments, 0, args, 1, arguments.length);
-        lookup.unreflect(method).invokeWithArguments(args);
-    }
-
-    private Object getStaticValue(Class<?> clazz, String field) throws Throwable {
-        Field valueField = findField(clazz, field);
-        Unsafe unsafe = getUnsafe();
-        Object base = unsafe.staticFieldBase(valueField);
-        long offset = unsafe.staticFieldOffset(valueField);
-        return unsafe.getObjectVolatile(base, offset);
-    }
-
-    private Unsafe getUnsafe() throws NoSuchFieldException, IllegalAccessException {
-        if (unsafe != null) {
-            return unsafe;
-        }
-        Field unsafeField = findField(Unsafe.class, "theUnsafe");
-        unsafeField.setAccessible(true);
-        return unsafe = (Unsafe) unsafeField.get(null);
-    }
-
-    private Field findField(Class<?> target, String field) throws NoSuchFieldException {
-        try {
-            return target.getField(field);
-        } catch (NoSuchFieldException i) {
-            return target.getDeclaredField(field);
-        }
-    }
-
-    private Method findMethod(Class<?> target, String method, Class<?>... classes) throws NoSuchMethodException {
-        try {
-            return target.getMethod(method, classes);
-        } catch (NoSuchMethodException i) {
-            return target.getDeclaredMethod(method, classes);
-        }
-    }
-
-    private URLClassLoader getUrlClassLoader() {
-        if (urlClassLoader != null) {
-            return urlClassLoader;
-        }
-        ArrayList<ClassLoader> list = new ArrayList<ClassLoader>();
-        for (ClassLoader classLoader : classLoaders) {
-            // Try parents first
-            collectParents(list, classLoader);
-            for (ClassLoader parent : list) {
-                if (!(parent instanceof URLClassLoader)) {
-                    continue;
-                }
-                return urlClassLoader = (URLClassLoader) parent;
+    private URLClassLoader findHighestURLClassLoader() {
+        ClassLoader loader = getClass().getClassLoader();
+        URLClassLoader urlLoader = null;
+        while (loader != null) {
+            if (loader instanceof URLClassLoader) {
+                urlLoader = (URLClassLoader) loader;
             }
-            if (classLoader instanceof URLClassLoader) {
-                return urlClassLoader = (URLClassLoader) classLoader;
-            }
-            list.clear();
+            loader = loader.getParent();
         }
-        throw new IllegalStateException("Could not find URLClassLoader");
-    }
-
-    private void collectParents(Collection<ClassLoader> parents, ClassLoader loader) {
-        if (loader.getParent() == null) {
-            return;
-        }
-        collectParents(parents, loader.getParent());
-        parents.add(loader.getParent());
+        return urlLoader;
     }
 
     private int readCurrentVersion() {

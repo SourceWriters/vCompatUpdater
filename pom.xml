@@ -4,7 +4,7 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>net.sourcewriters.minecraft</groupId>
 	<artifactId>vcompat-updater</artifactId>
-	<version>1.0.4</version>
+	<version>1.0.5</version>
 	<name>vCompatUpdater</name>
 	<distributionManagement>
 		<repository>
@@ -53,7 +53,7 @@
 							</excludes>
 						</filter>
 					</filters>
-					<createDependencyReducedPom>true</createDependencyReducedPom>
+					<createDependencyReducedPom>false</createDependencyReducedPom>
 					<relocations>
 						<relocation>
 							<pattern>com.syntaxphoenix.syntaxapi</pattern>
