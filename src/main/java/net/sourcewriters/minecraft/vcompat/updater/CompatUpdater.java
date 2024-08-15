@@ -26,16 +26,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
-import com.syntaxphoenix.syntaxapi.json.JsonArray;
-import com.syntaxphoenix.syntaxapi.json.JsonObject;
-import com.syntaxphoenix.syntaxapi.json.JsonValue;
-import com.syntaxphoenix.syntaxapi.json.ValueType;
-import com.syntaxphoenix.syntaxapi.json.value.JsonInteger;
-import com.syntaxphoenix.syntaxapi.net.http.Request;
-import com.syntaxphoenix.syntaxapi.net.http.RequestType;
-import com.syntaxphoenix.syntaxapi.net.http.Response;
-import com.syntaxphoenix.syntaxapi.net.http.StandardContentType;
-
+import me.lauriichan.laylib.json.IJson;
+import me.lauriichan.laylib.json.JsonArray;
+import me.lauriichan.laylib.json.JsonObject;
 import sun.misc.Unsafe;
 
 public final class CompatUpdater {
@@ -80,7 +73,7 @@ public final class CompatUpdater {
         }
         try {
             WrappedURLClassLoader.setup(lookup);
-        } catch(Throwable e) {
+        } catch (Throwable e) {
             setFailed(e);
         }
     }
@@ -407,26 +400,23 @@ public final class CompatUpdater {
     }
 
     private String getAssetUrl(String version) {
+
         try {
-            Request request = new Request(RequestType.GET).header("Accept", "application/vnd.github.v3+json");
-            if (authenticator != null) {
-                authenticator.authenticate(request);
-            }
-            Response response = request.execute(String.format(GITHUB_RELEASE, 'v' + version), StandardContentType.JSON);
-            if (response.getCode() != 200) {
+            Http.Response<JsonObject> response = Http.create().url(String.format(GITHUB_RELEASE, 'v' + version))
+                .authenticator(authenticator).call(Http.Response.JSON_OBJECT);
+            if (response.code() != 200) {
                 return null;
             }
-            JsonObject object = (JsonObject) response.getResponseAsJson();
-            JsonArray array = (JsonArray) object.get("assets");
-            for (JsonValue<?> value : array) {
-                JsonObject asset = (JsonObject) value;
-                String name = (String) asset.get("name").getValue();
+            JsonObject object = response.data();
+            for (IJson<?> value : object.get("assets").asJsonArray()) {
+                JsonObject asset = value.asJsonObject();
+                String name = asset.get("name").asJsonString().value();
                 if (name.startsWith("vcompat") && name.endsWith(".jar")) {
-                    return (String) asset.get("browser_download_url").getValue();
+                    return asset.get("browser_download_url").asJsonString().value();
                 }
             }
             return null;
-        } catch (IOException exp) {
+        } catch (Exception exp) {
             setFailed(exp);
             updateAll();
             return null;
@@ -510,43 +500,41 @@ public final class CompatUpdater {
     }
 
     private boolean readGithubVersion() {
-        Request request = new Request(RequestType.GET).modifyUrl(true).header("Accept", "application/vnd.github.v3+json");
-        if (authenticator != null) {
-            authenticator.authenticate(request);
-        }
+        Http.Request request = Http.create().url(GITHUB_TAGS).authenticator(authenticator);
         int requested = getRequested(false);
         int previous = 0;
         int page = 0;
         boolean found = false;
         try {
             while (requested != previous && !found) {
-                Response response = request.clearParameters().parameter("per_page", "40").parameter("page", new JsonInteger(page++))
-                    .modifyUrl(true).execute(GITHUB_TAGS, StandardContentType.URL_ENCODED);
-                if (response.getCode() == 404) {
+                Http.Response<IJson<?>> response = request.clearParams().param("per_page", "40").param("page", page++)
+                    .call(Http.Response.JSON);
+                if (response.code() == 404) {
                     previous = requested;
                     requested = getRequested(true);
                     continue;
                 }
-                JsonValue<?> rawValue = response.getResponseAsJson();
-                if (response.getCode() == 403) {
-                    setFailed(new IllegalStateException((String) ((JsonObject) rawValue).get("message").getValue()));
+                IJson<?> rawValue = response.data();
+                if (response.code() == 403) {
+                    setFailed(new IllegalStateException(rawValue.asJsonObject().get("message").asJsonString().value()));
                     return false;
                 }
-                JsonArray array = (JsonArray) rawValue;
+                JsonArray array = rawValue.asJsonArray();
                 if (array.isEmpty()) {
                     previous = requested;
                     requested = getRequested(true);
                     continue;
                 }
-                for (JsonValue<?> value : array) {
-                    if (value.getType() != ValueType.OBJECT) {
+                for (IJson<?> value : array) {
+                    if (!value.isObject()) {
                         continue;
                     }
-                    JsonObject object = (JsonObject) value;
-                    if (!object.has("name", ValueType.STRING)) {
+                    JsonObject object = value.asJsonObject();
+                    IJson<?> objName = object.get("name");
+                    if (objName == null || !objName.isString()) {
                         continue;
                     }
-                    String version = ((String) object.get("name").getValue()).substring(1);
+                    String version = objName.asJsonString().value().substring(1);
                     if (requested == Integer.valueOf(version.split("\\.", 2)[0])) {
                         write.lock();
                         try {
@@ -569,7 +557,7 @@ public final class CompatUpdater {
         } catch (SocketTimeoutException timeout) {
             setNoConnection();
             return false;
-        } catch (IOException exp) {
+        } catch (Exception exp) {
             setFailed(exp);
             return false;
         }

@@ -4,7 +4,7 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>net.sourcewriters.minecraft</groupId>
 	<artifactId>vcompat-updater</artifactId>
-	<version>1.0.4</version>
+	<version>2.0.0</version>
 	<name>vCompatUpdater</name>
 	<distributionManagement>
 		<repository>
@@ -15,12 +15,13 @@
 	</distributionManagement>
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<laylib.version>0.2.0-SNAPSHOT</laylib.version>
 	</properties>
 	<dependencies>
 		<dependency>
-			<groupId>com.syntaxphoenix.syntaxapi</groupId>
-			<artifactId>net</artifactId>
-			<version>2.0.15</version>
+			<groupId>me.lauriichan.laylib</groupId>
+			<artifactId>json</artifactId>
+			<version>${laylib.version}</version>
 		</dependency>
 	</dependencies>
 	<build>
@@ -56,8 +57,9 @@
 					<createDependencyReducedPom>false</createDependencyReducedPom>
 					<relocations>
 						<relocation>
-							<pattern>com.syntaxphoenix.syntaxapi</pattern>
-							<shadedPattern>net.sourcewriters.minecraft.vcompat.updater.shaded.syntaxapi</shadedPattern>
+							<pattern>me.lauriichan.laylib</pattern>
+							<shadedPattern>
+								net.sourcewriters.minecraft.vcompat.updater.shaded.laylib</shadedPattern>
 						</relocation>
 					</relocations>
 				</configuration>
